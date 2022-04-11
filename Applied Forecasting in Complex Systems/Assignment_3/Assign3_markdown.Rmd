@@ -1,0 +1,441 @@
+---
+title: "Assignment 3"
+author: "Team 23: Hetian Chen, Teun Zwier, Spyros Avlonitis, Dragos Pop"
+date: "30 November 2021"
+geometry: margin=1.27cm
+output:
+  pdf_document: default
+  word_document: default
+fontsize: 11pt
+highlight: tango
+---
+
+```{r include = FALSE}
+library(fpp2)
+library(fpp3)
+library("readxl")
+library(ggplot2)
+library(tsibble) 
+library(ggfortify)
+```
+
+## **Exercise 1**\
+**1.1)**
+<!-- What sort of ARIMA model is identified for ηt? Elaborate your comments. -->
+Here we have a seasonal $ARIMA(0,1,1)(2,1,0)_{12}$ model. We extract the d,q for the non-seasonal part by looking into the $(1-B)$ and $(1+\theta_1B)$ parts of the equation. Also we can see that the autogression part is missing and thus p is 0. For the seasonal part we can see that the period is 12 and the d is 1 by looking into $(1-B^{12})$. Also, p is 2 as described in $(1-\phi_1B^{12}-\phi_2B^{24})$, and q is 0 as the MA part is missing.
+
+**1.2)**
+<!-- Write the equation in a form more suitable for forecasting. -->
+First we apply the difference to the model equation:
+$$
+\small
+\begin{aligned}
+(1-B)(1-B^{12})y_t^*=b_1^*(1-B)(1-B^{12})x_{1,t}^*+b_2^*(1-B)(1-B^{12})x_{2,t}^*+\eta_t
+\end{aligned}
+$$
+Then converting the backshift operator:
+$$
+\small
+\begin{aligned}
+(y_t^*-y_{t-1}^*-y_{t-12}^*+y_{t-13}^*)=\\b_1(x_{1,t}^*-x_{1,t-1}^*-x_{1,t-12}^*+x_{1,t-13}^*) + b_2(x_{2,t}^*-x_{2,t-1}^*-x_{2,t-12}^*+x_{2,t-13}^*) + (1-B)(1-B^{12})\eta_t
+\end{aligned}
+$$
+
+Next, we apply the autoregression $(1-\Phi_1B^{12}-\Phi_2B^{24})$
+$$
+\small
+\begin{aligned}
+(1-\Phi_1B^{12}-\Phi_2B^{24})(y_t^*-y_{t-1}^*-y_{t-12}^*+y_{t-13}^*)=\\b_1(1-\Phi_1B^{12}-\Phi_2B^{24})(x_{1,t}^*-x_{1,t-1}^*-x_{1,t-12}^*+x_{1,t-13}^*) + \\ b_2(1-\Phi_1B^{12}-\Phi_2B^{24})(x_{2,t}^*-x_{2,t-1}^*-x_{2,t-12}^*+x_{2,t-13}^*) + \\(1-\Phi_1B^{12}-\Phi_2B^{24})(1-B)(1-B^{12})\eta_t
+= \\
+(1-\Phi_1B^{12}-\Phi_2B^{24})(b_1(x_{1,t}^*-x_{1,t-1}^*-x_{1,t-12}^*+x_{1,t-13}^*) + \\b_2(x_{2,t}^*-x_{2,t-1}^*-x_{2,t-12}^*+x_{2,t-13}^*)) + \\(1+\theta_1B)\epsilon_t
+= \\
+(1-\Phi_1B^{12}-\Phi_2B^{24})(b_1(x_{1,t}^*-x_{1,t-1}^*-x_{1,t-12}^*+x_{1,t-13}^*) + \\b_2(x_{2,t}^*-x_{2,t-1}^*-x_{2,t-12}^*+x_{2,t-13}^*)) + \\(\epsilon_t + \theta_1\epsilon_{t-1})
+\end{aligned}
+$$
+Above we should convert the backshift operator as we did before, however we will consider it a trivial task and skip it to save some space. Next we should keep $y_t^*$ on the one LHS and move everything to the RHS.
+$$
+\small
+\begin{aligned}
+y_t^* = (\Phi_1B^{12}-\Phi_2B^{24}) y_t^* \\+  
+(1-\Phi_1B^{12}-\Phi_2B^{24})( (y_{t-1}^*+y_{t-12}^*-y_{t-13}^*) \\+ b_1(x_{1,t}^*-x_{1,t-1}^*-x_{1,t-12}^*+x_{1,t-13}^*) + b_2(x_{2,t}^*-x_{2,t-1}^*-x_{2,t-12}^*+x_{2,t-13}^*)) + (\epsilon_t + \theta_1\epsilon_{t-1})
+\end{aligned}
+$$
+**1.3)**
+<!-- Once you have a model with white noise residuals, produce forecasts for the next year.Describe how this model could be used to forecast electricity demand for the next 12 months. -->
+Then, in order to forecast electricity demand for the next 12 months, we should first rewrite the equation by replacing $t$ with $T+h$. Then,on the right hand side of the equation, we should replace future observations with their forecasts, future errors with zero, and past errors with the corresponding residuals. Finally, we can teratively solve it for h=1,2,...,11,12 and get the forecast for the next 12 months.
+
+
+### Exercise 2.1)
+First, get sample from dataset and find most optimal lambda.
+```{r aus_retail}
+set.seed(11345678)
+myseries <- aus_retail %>% filter(`Series ID` == sample(aus_retail$`Series ID`,1))
+myseries %>% features(Turnover, guerrero)
+```
+-0.092 was found to be the most optimal lambda value for this specific seed, so close to a logarithmic transformation. Now, try model for order k = 0 - 6.
+
+```{r myseries}
+fit_box <- myseries %>% 
+  model (K_1 = ARIMA(box_cox(Turnover, -0.0918) ~ fourier(K = 1) + PDQ(0 ,0 ,0)) ,
+         K_2 = ARIMA(box_cox(Turnover, -0.0918) ~ fourier(K = 2) + PDQ(0 ,0 ,0)) ,
+         K_3 = ARIMA(box_cox(Turnover, -0.0918) ~ fourier(K = 3) + PDQ(0 ,0 ,0)) ,
+         K_4 = ARIMA(box_cox(Turnover, -0.0918) ~ fourier(K = 4) + PDQ(0 ,0 ,0)) ,
+         K_5 = ARIMA(box_cox(Turnover, -0.0918) ~ fourier(K = 5) + PDQ(0 ,0 ,0)) ,
+         K_6 = ARIMA(box_cox(Turnover, -0.0918) ~ fourier(K = 6) + PDQ(0 ,0 ,0)))
+glance(fit_box) %>% select(.model, sigma2, log_lik, AIC, AICc, BIC)
+
+```
+
+Looking at the table, the AICc is lowest for K = 6, so this model is chosen. For k = 6, the automatically chosen ARIMA-model has parameters (2,1,1)
+
+### Exercise 2.2)
+Looking at the residuals in graph 2.1, there is no clear pattern in residuals in top graph. The residuals seem to be following a normal distribution, being roughly bell shaped with tails of equal length. There seem to be some significant autocorrelations. To check if the residuals resemble white noise, we can use the Ljung-box test.
+```{r}
+fit_box %>% select(K_6) %>% augment() %>% 
+  features(.innov, ljung_box, dof = 16, lag = 24)
+```
+The Ljung Box test is significant. This result, combined with the ACF plot, suggests that the residuals do not resemble white noise. 
+
+### Exercise 2.3)
+To compare the models, we forecast the last 2 years of the dataset. 
+```{r}
+train <- myseries %>% filter(Month <= yearmonth( "2016 dec" ))
+fit_compare <- train %>% 
+  model(dyn_regr= ARIMA(box_cox(Turnover, -0.0918) ~ fourier(K = 6) + PDQ(0 ,0 ,0)), 
+        ets = ETS(box_cox(Turnover, -0.0918)), 
+        arima = ARIMA(box_cox(Turnover, -0.0918)))
+fc_compare <- fit_compare %>% forecast(h=24)
+fc_compare %>% accuracy(myseries)
+```
+Looking at the accuracy of the fits, the ARIMA model does the best for this train/test split for all error measures. All the forecasts seem to be reasonably close to the real data, looking at the error measures and the graphs 2.2, 2.3 and 2.4. The ARIMA model with seasonality may show better results here because of change in seasonality, which the fourier terms do not account for.  
+
+
+
+
+
+
+
+### Exercise 3.1)
+First we get the training set and fit harmonic regression with trend models with multiple values for parameter K. And then we rank the models according to their AICc values: 
+```{r}
+train_set <- us_gasoline %>% filter_index(~ '2004 W52')
+train_fit <- train_set %>% 
+  model(
+    'K_5' = ARIMA(Barrels ~ trend() + fourier(K = 5)),
+    'K_6' = ARIMA(Barrels ~ trend() + fourier(K = 6)),
+    'K_7' = ARIMA(Barrels ~ trend() + fourier(K = 7)),
+    'K_8' = ARIMA(Barrels ~ trend() + fourier(K = 8)),
+    'K_9' = ARIMA(Barrels ~ trend() + fourier(K = 9)))
+train_fit %>% glance() %>% arrange(AICc)
+```
+As we can see, the harmonic regression model with K = 7 has the lowest AICc value. Thus we pick this model. <br />  
+
+Now we plot the fitted values against the observed values of the training set in graph **3.1** in appendix. <br />  
+
+As we can see in the plot, the harmonic regression model captures the trend quite well. The fitted values are also quite close to the observed values in seasonal pattern, but the observed magnitude of the observed seasonality is a bit bigger than the fitted values. <br />  
+
+In graph **3.2** in appendix, we could see the residuals of the harmonic regression model are close to white noise, although there appears to be some upward trend in the ACF plot. <br />  
+
+Now we check the residuals of the harmonic regression model with the Ljung-Box test: 
+```{r}
+dof_1 <- train_fit %>% select('K_7') %>% tidy() %>% nrow()
+train_fit %>% select('K_7') %>% augment() %>% 
+  features(.innov, ljung_box, dof = dof_1, lag = 52)
+```
+The p-value for Ljung-Box test is `r train_fit %>% select('K_7') %>% augment() %>% features(.innov, ljung_box, dof = dof_1, lag = 52) %>% select(lb_pvalue) %>% round(2)`. Thus, at significance level of 95%, we can reject the null hypothesis and claim that the residuals are not white noise. However, at significance level of 99%, we can consider the residuals as white noise and calculate forecasts and prediction intervals. 
+
+
+### Exercise 3.2)
+Now we forecast the next year (2005) with data generated from the _fourier()_ function. And the we plot the forecasts agains the observed values: 
+```{r}
+fc_1 <- train_fit %>% select('K_7') %>% 
+  forecast(xreg = fourier(train_set, K = 7, h = 52)) %>% 
+  filter(year(Week) == 2005)
+```
+The forecasts could be seen in graph **3.3** in appendix. The forecasts capture the trend quite well, except for the drop in 2005. The forecasts are quite smooth in seasonality compared to the observed values. <br />  
+
+Now we fit a harmonic regression with a piecewise linear time trend to the full gasoline series. First we need to find the knots. In graph **3.4** in appendix, we could see two knots: the first being around 2006-2007 with the second one around 2012-2014. <br />  
+
+Now we fit the models and we rank the models according to their AICc values. Note that as we have already learnt that K = 7 is optimal in part(1), we will continue to use K = 7 for fitting: 
+```{r}
+hybrid_fit <- us_gasoline %>% 
+  model(
+    pw_1 = TSLM(Barrels ~ trend(knots = c(2006, 2012)) + fourier(K = 7)), 
+    pw_2 = TSLM(Barrels ~ trend(knots = c(2006, 2013)) + fourier(K = 7)),
+    pw_3 = TSLM(Barrels ~ trend(knots = c(2006, 2014)) + fourier(K = 7)),
+    pw_4 = TSLM(Barrels ~ trend(knots = c(2007, 2012)) + fourier(K = 7)),
+    pw_5 = TSLM(Barrels ~ trend(knots = c(2007, 2013)) + fourier(K = 7)),
+    pw_6 = TSLM(Barrels ~ trend(knots = c(2007, 2014)) + fourier(K = 7)))
+hybrid_fit %>% glance() %>% arrange(AICc) %>% 
+  select(-sigma2, -statistic, -p_value, -deviance, -df.residual, -rank)
+```
+In the metrics table, we could find that _pw_1_, which has 2006 and 2012 as two knots, has the lowest AICc value. Thus this is the best model for harmonic regression with a piecewise linear time trend. 
+
+
+
+
+### Exercise 3.3)
+Now we use _ARIMA()_ function instead of _TSLM()_ to allow for correlated errors, with the same predictor variables in part(2). <br />  
+We start from the simple model with _PDQ(0, 0, 0)_ and check the residuals of the model with Ljung-Box test: 
+
+```{r}
+new_fit_0 <- us_gasoline %>% 
+  model('model' = ARIMA(Barrels ~ trend(knots = c(2006, 2012)) +
+                          fourier(K = 7) + PDQ(0, 0, 0)))
+dof_2 <- new_fit_0 %>% tidy() %>% nrow()
+new_fit_0 %>% augment() %>% features(.innov, ljung_box, dof = dof_2, lag = 52)
+```
+The residuals are plotted in graph **3.5** in appendix, which look close to white noise. However, the p-value of the Ljung-Box test is `r new_fit_0 %>% augment() %>% features(.innov, ljung_box, dof = dof_2, lag = 52)`, which rejects the null hypothesis that the residuals are white noise, at significance lever 99%. <br />  
+
+We try to modify our model. First we plot the ACF and PACF of first order difference of the original series in graph **3.6** in appendix. There is 1 significant lag in ACF plot and 3 significant lags in PACF plot. So we consider adding _pdq(3, 1, 1)_ to the ARIMA model. Also we add MA(1) to the seasonal ARIMA. <br />  
+Eventually come up with these parameters: 
+```{r}
+new_fit <- us_gasoline %>% 
+  model(
+    'model' = ARIMA(Barrels ~ trend(knots = c(2006, 2012)) + 
+                      fourier(K = 7) + pdq(3, 1, 1) + PDQ(0, 0, 1)))
+dof_3 <- new_fit %>% tidy() %>% nrow()
+new_fit %>% augment() %>% features(.innov, ljung_box, dof = dof_3, lag = 52)
+```
+The residuals are plotted in graph **3.7** in appendix, which look even closer to white noise. The p-value of the Ljung-Box test is `r new_fit %>% augment() %>% features(.innov, ljung_box, dof = dof_3, lag = 52) %>% select(lb_pvalue) %>% round(3)`. So at significance level 99%, the null hypothesis is not rejected and we can consider the residuals as white noise. <br />  
+
+Now we use this model to forecast the next year (52 weeks): 
+
+```{r, fig.margin = TRUE,fig.align="center"}
+new_fc <- new_fit %>% 
+  forecast(xreg = fourier(us_gasoline, K = c(7), h = 52)) %>% 
+  filter_index(. ~ '2018 W03')
+```
+<br />  
+As we can see in graph **3.8** in appendix, the model performs well in forecasting the seasonality but not too well with the trend. 
+
+
+### Exercise 4.1)
+After the series were parsed, they were plotted. Since the variation does not increase over time in any of the time series, no transformation was applied. 
+
+```{r}
+my_cols <- c('NN3_101','NN3_102','NN3_103','NN3_104','NN3_105',	'NN3_106','NN3_107','NN3_108','NN3_109','NN3_110','NN3_111')
+my_data <- read_excel("/Users/dragos/Desktop/Applied Forecasting in Complex Systems/Assignments/Assignment 3/NN3_REDUCED_DATASET_WITH_TEST_DATA.xls", skip = 18, col_names = my_cols)
+data1 = my_data[1] %>%  mutate(i = 1:n()) %>% as_tsibble(index = i)
+data2 = my_data[2] %>%  mutate(i = 1:n()) %>% as_tsibble(index = i)
+data3 = my_data[3] %>%  mutate(i = 1:n()) %>% as_tsibble(index = i)
+data4 = my_data[4] %>%  mutate(i = 1:n()) %>% as_tsibble(index = i)
+data5 = my_data[5] %>%  mutate(i = 1:n()) %>% as_tsibble(index = i)
+data6 = my_data[6] %>%  mutate(i = 1:n()) %>% as_tsibble(index = i)
+data7 = my_data[7] %>%  mutate(i = 1:n()) %>% as_tsibble(index = i)
+data8 = my_data[8] %>%  mutate(i = 1:n()) %>% as_tsibble(index = i)
+data9 = my_data[9] %>%  mutate(i = 1:n()) %>% as_tsibble(index = i)
+data10 = my_data[10] %>%  mutate(i = 1:n()) %>% as_tsibble(index = i)
+data11 = my_data[11] %>%  mutate(i = 1:n()) %>% as_tsibble(index = i)
+```
+
+### Exercise 4.2)
+First, a new column representing the month was added as index for each time series and then the data was sliced in the train and test sets. Next, the six models, namely Naive, Mean, Simple Exponential Smoothing, Damped Exponential Smoothing, Seasonal Exponential Smoothing, and ARIMA were fitted to the train data. Lastly, the models were used to generate forecasts for the next 18 months, which were later evaluated in raport with the true values from the test set. Accordingly, one can see in the tables below the metrics for each time series.
+```{r}
+for(j in 1:ncol(my_data))
+{
+  this_ts <- my_data[j][!is.na(my_data[j]), ] %>%  
+    mutate(i = seq(as.Date('1979-01-01'), by = 'months', length = n())) %>% mutate(i = yearmonth(i)) %>% 
+    as_tsibble(index = i)
+  
+  this_name = colnames(this_ts)[1]
+  colnames(this_ts)[1] <- 'NN'
+  colnames(this_ts)[2] <- 'Date'
+  
+  this_train_set <- this_ts[1:(nrow(this_ts)-18), ]
+  this_test_set <- this_ts[(nrow(this_ts)-17):nrow(this_ts), ]
+  
+  this_fit <- this_train_set %>% 
+    model(
+      Mean = MEAN(NN),
+      Naive = NAIVE(NN),
+      Simple_ETS = ETS(NN ~ error("A") + trend("N") + season("N")),
+      Damped_ETS = ETS(NN ~ error('A') + trend('Ad') + season('N')),
+      Season_ETS = ETS(NN ~ error('A') + trend('A') + season('A')),
+      ARIMA = ARIMA(NN))
+  
+  m1 <- this_fit %>% forecast(this_test_set) %>% accuracy(this_ts) %>% select(.model, RMSE, MAE, MAPE)
+  
+  this_fc <- this_fit %>% forecast(this_test_set) 
+  this_fc_2 <- this_fc %>% as_tsibble() %>% select(.model, Date, .mean) %>% pivot_wider(names_from = .model, values_from = .mean)
+  this_fc_3 <- bind_cols(this_fc_2, this_test_set['NN'])
+  colnames(this_fc_3)[8] <- 'True_Value'
+  this_fc_4 <- this_fc_3 %>% pivot_longer(c(Mean, Naive, Simple_ETS, Damped_ETS, Season_ETS, ARIMA), names_to = '.model', values_to = 'NN')
+  this_fc_4 <- this_fc_4 %>% mutate(E = 200*abs(NN-True_Value)/(NN+True_Value))
+  m2 <- this_fc_4 %>% as_tibble() %>% group_by(.model) %>% summarise(sMAPE = mean(E))
+  m <- bind_cols(m1, m2[2])
+  m <- m %>% mutate(MSE = RMSE ^ 2)
+  print(this_name);print(m)
+}
+```
+
+### Exercise 4.3)
+For the first time series, namely NN3_101, all the metrics are pointing to the Seasonal Exponential Smoothing model as the best models, registering the smallest values in comparison with the other models, followed by the ARIMA model. <br />  
+
+Regarding the second series, the table shows the ARIMA model outperforms by far the other five models. <br />  
+
+According to the metrics in the third table, one can see that again the seasonal SES has the lowest values for all the evaluation metrics, being followed by the ARIMA This means that, as in the first time series, the Seasonal Exponential Smoothing model makes the most accurate forecast, as expected considering the strong seasonality of the data as seen in figure **4.3**. <br />  
+
+When it comes to the fourth time series, the ARIMA is closely followed by the Seasonal ETS, with the other four models being far behind. <br />  
+
+For NN3_105, Seasonal Exponential Smoothing seems to provide very accurate predictions in comparison with the other models. The best model in case of the sixth series is ARIMA model, followed unexpectedly by the simple methods Mean and Naive. <br />  
+
+For the seventh time series, ARIMA makes the most accurate predictions by far, as opposed to NN3_108, where the Naive model outperforms the rest, followed by the simple Mean model.  <br />  
+
+From the ninth table, one can notice that Seasonal ETS has the lowest values for all the metrics, meaning that its predictions score the best against the true values from the test set.  <br />  
+
+Next, the tenth time series is best predicted by the Damped Exponential Smoothing model, which seems to learn from the slightly decreasing trend of the data. <br />  
+
+Finally, the last table shows the lowest errors for the Seasonal Exponential Smoothing model.
+
+
+
+
+# Appendix
+
+## Graphs for Exercise 2
+
+```{r, fig.cap = 'Figure 2.1', fig.margin = TRUE,fig.align="center"}
+fit_box %>% select(K_6) %>% gg_tsresiduals() + labs(title = "Graph 2.1")
+```
+
+
+
+```{r, fig.cap = 'Figure 2.2', fig.margin = TRUE,fig.align="center"}
+test_compare <- myseries %>% filter(Month > yearmonth( "2016 dec" ))
+fc_compare %>% filter(.model == "dyn_regr") %>% 
+  autoplot(test_compare)+ labs(title="2.2 - Dynamic regression forecast")
+```
+
+```{r, fig.cap = 'Figure 2.3', fig.margin = TRUE,fig.align="center"}
+fc_compare %>% filter(.model == "arima") %>% 
+  autoplot(test_compare)+ labs(title="2.3 - Arima forecast")
+```
+
+
+```{r, fig.cap = 'Figure 2.4', fig.margin = TRUE,fig.align="center"}
+fc_compare %>% filter(.model == "ets") %>% 
+  autoplot(test_compare)+ labs(title="2.4 - ETS forecast")
+```
+
+
+## Graphs for Exercise 3
+Graph 3.1 - Observed values vs. fitted values of harmonic regression model with trend: 
+```{r, fig.cap = 'Figure 3.1', fig.margin = TRUE,fig.align="center"}
+train_fit %>% select('K_7') %>% augment() %>% rename(Observed = Barrels, Fitted = .fitted) %>% 
+  pivot_longer(Observed: Fitted, names_to = 'Type', values_to = 'Barrels') %>% 
+  autoplot(Barrels) +
+  labs(title = '3.1 - Harmonic Regression Model - Fitted vs. Observed') +
+  ylab('Million Barrels')
+```
+<br />  
+
+Graph 3.2 - Residuals of harmonic regression model with K = 7
+```{r, fig.cap = 'Figure 3.2', fig.margin = TRUE,fig.align="center"}
+train_fit %>% select('K_7') %>% gg_tsresiduals() +
+  labs(title = '3.2 - Residuals of Harmonic Regression Model')
+```
+<br />  
+
+Graph 3.3 - Forecasts and observed values of 2005
+```{r, fig.cap = 'Figure 3.3', fig.margin = TRUE,fig.align="center"}
+test_set <- us_gasoline %>% filter(year(Week) == 2005)
+test_set %>% autoplot(Barrels) + geom_line(data = fc_1, aes(y = .mean)) + 
+  autolayer(fc_1, alpha = 0.4) + 
+  labs(title = '3.3 - Forecast vs. Observed Values of 2005') + 
+  ylab('Million Barrels')
+```
+<br />  
+
+Graph 3.4 - US Gasoline Weekly Supplies
+```{r, fig.cap = 'Figure 3.4', fig.margin = TRUE,fig.align="center"}
+us_gasoline %>% autoplot(Barrels) + 
+  labs(title = '3.4 - US Gasoline Weekly Supplies') + 
+  ylab('Million Barrels')
+```
+<br />  
+
+Graph 3.5 - Residuals of the simple model with _PDQ(0, 0, 0)_
+```{r, fig.cap = 'Figure 3.5', fig.margin = TRUE,fig.align="center"}
+new_fit_0 %>% gg_tsresiduals() + labs(title = '3.5 - Residuals of simeple model')
+```
+<br />  
+
+Graph 3.6 - ACF and PACF plots of US gasoline
+```{r, fig.cap = 'Figure 3.6', fig.margin = TRUE,fig.align="center"}
+us_gasoline %>% gg_tsdisplay(difference(Barrels), plot_type = 'partial') + 
+  labs(title = '3.6 - ACF & PACF of US Gasoline')
+```
+<br />  
+
+Graph 3.7 - Residuals of the optimized model
+```{r, fig.cap = 'Figure 3.7', fig.margin = TRUE,fig.align="center"}
+new_fit %>% gg_tsresiduals() + labs(title = '3.7 - Residuals of final model')
+```
+<br />  
+
+Graph 3.8 - Forecast of the next year
+```{r, fig.cap = 'Figure 3.8', fig.margin = TRUE,fig.align="center"}
+us_gasoline %>% autoplot(Barrels) + geom_line(data = new_fc, aes(y = .mean)) +
+  autolayer(new_fc) + 
+  labs(title = '3.8 - Forecast of US Gasoline') + 
+  ylab('Million Barrels')
+```
+<br />  
+
+
+## Graphs for Exercise 4
+```{r echo = FALSE, fig.cap = 'Figure 4.1', fig.margin = TRUE,fig.align="center"}
+autoplot(as.ts(data1)) + labs(title = "Graph 4.1 - NN3_101") + xlab('Month')
+```
+<br />  
+
+```{r echo = FALSE, fig.cap = 'Figure 4.2', fig.margin = TRUE,fig.align="center"}
+autoplot(as.ts(data2)) + labs(title = "Graph 4.2 - NN3_102") + xlab('Month')
+```
+<br />  
+
+```{r echo = FALSE, fig.cap = 'Figure 4.3', fig.margin = TRUE,fig.align="center"}
+autoplot(as.ts(data3)) + labs(title = "Graph 4.3 - NN3_103") + xlab('Month')
+```
+<br />  
+
+```{r echo = FALSE, fig.cap = 'Figure 4.4', fig.margin = TRUE,fig.align="center"}
+autoplot(as.ts(data4)) + labs(title = "Graph 4.5 - NN3_104") + xlab('Month')
+```
+<br />  
+
+```{r echo = FALSE, fig.cap = 'Figure 4.5', fig.margin = TRUE,fig.align="center"}
+autoplot(as.ts(data5)) + labs(title = "Graph 4.5 - NN3_105") + xlab('Month')
+```
+<br />  
+
+```{r echo = FALSE, fig.cap = 'Figure 4.6', fig.margin = TRUE,fig.align="center"}
+autoplot(as.ts(data6)) + labs(title = "Graph 4.6 - NN3_106") + xlab('Month')
+```
+<br />  
+
+```{r echo = FALSE, fig.cap = 'Figure 4.7', fig.margin = TRUE,fig.align="center"}
+autoplot(as.ts(data7)) + labs(title = "Graph 4.7 - NN3_107") + xlab('Month')
+```
+<br />  
+
+```{r echo = FALSE, fig.cap = 'Figure 4.8', fig.margin = TRUE,fig.align="center"}
+autoplot(as.ts(data8)) + labs(title = "Graph 4.8 - NN3_108") + xlab('Month')
+```
+<br />  
+
+```{r echo = FALSE, fig.cap = 'Figure 4.9', fig.margin = TRUE,fig.align="center"}
+autoplot(as.ts(data9)) + labs(title = "Graph 4.9 - NN3_109") + xlab('Month')
+```
+<br />  
+
+```{r echo = FALSE, fig.cap = 'Figure 4.10', fig.margin = TRUE,fig.align="center"}
+autoplot(as.ts(data10)) + labs(title = "Graph 4.10 - NN3_110") + xlab('Month')
+```
+<br />  
+
+```{r echo = FALSE, fig.cap = 'Figure 4.11', fig.margin = TRUE,fig.align="center"}
+autoplot(as.ts(data11)) + labs(title = "Graph 4.11 - NN3_111") + xlab('Month')
+```
+<br />  

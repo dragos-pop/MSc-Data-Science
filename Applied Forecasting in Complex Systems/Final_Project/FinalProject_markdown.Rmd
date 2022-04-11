@@ -1,0 +1,971 @@
+---
+title: "Sales_Forecasting_Spyros_Teun_David"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(fpp2)
+library(fpp3)
+library("readxl")
+library(ggplot2)
+library('stringr')
+library(tsibble) 
+library(ggfortify)
+library(zoo)
+library(fable.prophet)
+library(gridExtra)
+set.seed(1)
+```
+
+## Load datasets
+```{r}
+extract_ts <- function(df, min_date){
+  min_date <- date("2011-01-29")
+  df %>%
+    select(id, starts_with("d_")) %>%  
+    pivot_longer(starts_with("d_"), names_to = "dates", values_to = "sales") %>%
+    mutate(dates = as.integer(str_remove(dates, "d_"))) %>% 
+    mutate(date = min_date + dates - 1) %>% 
+    mutate(id = str_remove(id, "_TX_3_validation")) %>%
+    select(-dates)
+}
+
+calendar <- read.csv('./data/calendar_afcs2021.csv') %>% mutate(date = as.Date(date, format = "%m/%d/%Y")) %>% as_tsibble(index = date)
+train <- read.csv('./data/sales_train_validation_afcs2021.csv') %>% extract_ts %>% as_tsibble(key=id, index = date)
+test <- read.csv('./data/sales_test_validation_afcs2021.csv') %>% extract_ts %>% as_tsibble(key=id, index = date)
+sell_prices <- read.csv('./data/sell_prices_afcs2021.csv') %>% as_tsibble(key=item_id, index=wm_yr_wk)
+read.csv('./data/sales_train_validation_afcs2021.csv')
+sample_submission <- read.csv('./data/sample_submission_afcs2021.csv')
+```
+
+## Merge training data
+```{r}
+train_ext <- merge(x=train, y=calendar, by="date", all.x=TRUE)
+train_ext <- merge(x=train_ext, y=sell_prices, by.x=c("wm_yr_wk","id"), by.y=c("wm_yr_wk","item_id"))
+train_ext <- train_ext %>% as_tsibble(key=id, index = date)
+
+test_ext <- merge(x=test, y=calendar, by="date", all.x=TRUE)
+test_ext <- merge(x=test_ext, y=sell_prices, by.x=c("wm_yr_wk","id"), by.y=c("wm_yr_wk","item_id"))
+test_ext <- test_ext %>% as_tsibble(key=id, index = date)
+
+#Merge test and train for final predictions
+submission_dataset <- bind_rows(train_ext, test_ext)
+submission_dataset %>% glimpse
+
+submission_new_data <- merge(x=sell_prices, y=calendar, by="wm_yr_wk") %>% mutate(id=item_id)
+submission_new_data <- submission_new_data %>% as_tsibble(key=id, index = date) %>% filter_index('2016-05-23' ~ .)
+```
+
+## Create and select features
+```{r}
+#Train
+train_ext <- train_ext %>% mutate(
+  yday=yday(date), 
+  mday=mday(date), 
+  day_around_event= !is.na(lag(event_name_1)) | !is.na(lag(event_name_1,2)) | !is.na(lead(event_name_1)) | !is.na(lead(event_name_1, 2)) | !is.na(lag(event_name_2)) | !is.na(lag(event_name_2,2)) | !is.na(lead(event_name_2)) | !is.na(lead(event_name_2, 2)),
+  event_day= !is.na(event_name_1) |  !is.na(event_name_2),
+  avg_price_4weeks=rollmean(sell_price, k=28, fill=sell_price),
+  discount=(1 - sell_price/avg_price_4weeks),
+  sales_mean7=rollmean(sales, k=7, fill=sales)
+  )
+train_ext %>% glimpse
+train_ext <- train_ext %>% select(
+  id, date, sales, wday, mday, yday, month, year, event_day, day_around_event, snap_TX, sell_price, discount, sales_mean7, event_name_1 , event_name_2, weekday
+)
+#Test
+test_ext <- test_ext %>% mutate(
+  yday=yday(date), 
+  mday=mday(date), 
+  day_around_event= !is.na(lag(event_name_1)) | !is.na(lag(event_name_1,2)) | !is.na(lead(event_name_1)) | !is.na(lead(event_name_1, 2)) | !is.na(lag(event_name_2)) | !is.na(lag(event_name_2,2)) | !is.na(lead(event_name_2)) | !is.na(lead(event_name_2, 2)),
+  event_day=!(is.na(event_name_1) & is.na(event_name_2)),
+  avg_price_4weeks=rollmean(sell_price, k=28, fill=sell_price),
+  discount=(1 - sell_price/avg_price_4weeks),
+  sales_mean7=rollmean(sales, k=7, fill=sales)
+  )
+test_ext <- test_ext %>% select(
+  id, date, sales, wday, mday, yday, month, year, event_day, day_around_event, snap_TX, sell_price, discount, sales_mean7, event_name_1 , event_name_2, weekday
+)
+#Submission
+submission_new_data <- submission_new_data %>% mutate(
+  yday=yday(date), 
+  mday=mday(date), 
+  day_around_event= !is.na(lag(event_name_1)) | !is.na(lag(event_name_1,2)) | !is.na(lead(event_name_1)) | !is.na(lead(event_name_1, 2)) | !is.na(lag(event_name_2)) | !is.na(lag(event_name_2,2)) | !is.na(lead(event_name_2)) | !is.na(lead(event_name_2, 2)),
+  event_day= !is.na(event_name_1) |  !is.na(event_name_2),
+  avg_price_4weeks=rollmean(sell_price, k=28, fill=sell_price),
+  discount=(1 - sell_price/avg_price_4weeks)
+  )
+submission_new_data %>% glimpse
+submission_new_data <- submission_new_data %>% select(
+  id, date, wday, mday, yday, month, year, event_day, day_around_event, snap_TX, sell_price, discount, event_name_1 , event_name_2, weekday
+)
+```
+
+
+## Check dates
+```{r}
+c(min(calendar$date), max(calendar$date))
+c(min(train_ext$date), max(train_ext$date))
+c(min(test_ext$date), max(test_ext$date))
+c(min(submission_dataset$date), max(submission_dataset$date))
+```
+
+## 0 values for unit sold
+```{r}
+sum(train$sales == 0)/nrow(train)*100
+```
+
+## products with no units sold
+```{r}
+t <- train[ -c(3) ]  %>%  group_by(id) %>% summarise(Total_product_sales = sum(sales))
+t[t$Total_product_sales == 0, ]
+```
+
+## products with 0 selling price
+```{r}
+sell_prices[sell_prices$sell_price==0, ]
+```
+
+## units sold over time per product
+```{r}
+plot1 <- train[train$id=="FOODS_3_001",] %>% ggplot(aes(x = date, y = sales)) +
+  geom_line() +
+  facet_grid(vars(id), scales = "free_y")+ 
+  ggtitle("FOODS_3_001 sales over time")
+
+plot2 <- train[train$id=="FOODS_3_002",] %>% ggplot(aes(x = date, y = sales)) +
+  geom_line() +
+  facet_grid(vars(id), scales = "free_y")+ 
+  ggtitle("FOODS_3_002 sales over time")
+
+plot3 <- train[train$id=="FOODS_3_003",] %>% ggplot(aes(x = date, y = sales)) +
+  geom_line() +
+  facet_grid(vars(id), scales = "free_y")+ 
+  ggtitle("FOODS_3_003 sales over time")
+
+grid.arrange(plot1, plot2, plot3, ncol=1)
+```
+
+## Aggregate all sales
+```{r}
+daily_sales_train <- train_ext %>% index_by(date) %>% group_by(wday, month, yday, mday, event_day, snap_TX) %>% summarise(sales = sum(sales)) %>% update_tsibble(index = date, key=NULL)
+daily_sales_train %>% autoplot(sales) + 
+  labs(x = "Date", y = "Sales", title = "All aggregate sales")
+
+daily_sales_test <- test_ext %>% index_by(date) %>% group_by(wday, month, yday, mday, event_day, snap_TX) %>% summarise(sales = sum(sales)) %>% update_tsibble(index = date, key=NULL)
+daily_sales_test %>% autoplot(sales) + 
+  labs(x = "Date", y = "Sales", title = "All aggregate sales")
+```
+
+## Get a subset of train for development
+```{r}
+sample_ids <- train_ext %>% distinct(id) %>% sample_n(5)
+train_ext_small <- train_ext %>% filter(id %in% sample_ids$id)
+test_ext_small <- test_ext %>% filter(id %in% sample_ids$id)
+```
+
+## Plot a sample of the series
+```{r}
+#train_ext_small %>% ggplot(aes(x = date, y = sales)) +
+#  geom_line() +
+#  facet_grid(vars(id), scales = "free_y")
+```
+
+## units sold over time
+```{r}
+train$date <- as.Date(train$date)
+ggplot(data = train %>% 
+         group_by(date) %>%
+         summarise(Total_Sales = sum(sales))) + 
+  geom_line(aes(x = date, y = Total_Sales)) +
+  ylab("Units sold") + 
+  ggtitle("Aggregated sales over time")
+```
+
+## units sold over time
+```{r}
+# checking the dips exact dates and values
+sum(train[train$date == as.Date("2015-12-25"),]$sales) 
+sum(train[train$date == as.Date("2014-12-25"),]$sales)
+sum(train[train$date == as.Date("2013-12-25"),]$sales)
+sum(train[train$date == as.Date("2012-12-25"),]$sales)
+```
+
+## Decomposition for daily data
+```{r}
+dcmp <- daily_sales_train %>%
+  model(STL(sales ~ season(period = 'week') +
+                      season(period = 'month') +
+              season(period = 'year'),
+        robust = TRUE))
+components(dcmp) %>% autoplot()
+```
+## Decomposition for product level data
+```{r, fig.width=10}
+#dcmp_products <- train_ext_small %>%
+#  model(STL(sales ~ season(period = 'week') +
+#                      season(period = 'month') +
+#                      season(period = 'year'),
+#        robust = TRUE))
+#components(dcmp_products) %>% autoplot()
+```
+
+## Units sold per day of the week
+```{r}
+weekly_s <- train %>% 
+  mutate(wday = wday(date, label = TRUE, week_start = 1)) %>% 
+  group_by(wday) %>% 
+  summarise(sales = mean(sales))
+
+barplot(weekly_s$sales, names.arg = c("Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"), 
+        main = "Average sales per day of the week", ylab = "Average units sold", xlab = "Day of week")
+```
+
+## average selling price over time
+```{r}
+avg_sell_prices <- train_ext[-c(1,2,4,5,6,7,8,9,10,11,12,13,14)] %>% 
+  ungroup() %>%
+  group_by(date) %>% 
+  summarise(sales = mean(sell_price))
+avg_sell_prices
+ggplot(data = avg_sell_prices) + 
+  geom_line(aes(x = date, y = sales)) +
+  ylab("Average selling price") +
+  xlab("Day") + 
+  ggtitle("Average selling price over time")
+```
+
+## unit sales summary
+```{r}
+summary(train)
+
+den <-as.data.frame(train[-c(1,3)])
+plot(density(den$sales), main="Distribution of unit sales", xlab="Units sold")
+```
+
+## Harmonic regression on daily sales
+We will use a square root transformation to ensure the forecasts and prediction intervals remain positive. We set D = d = 0 in order to handle the non-stationarity through the regression terms, and P = Q = 0 in order to handle the seasonality through the regression terms.
+```{r}
+fit <- daily_sales_train %>% model(
+    ARIMA(sqrt(sales) ~ PDQ(0, 0, 0) + pdq(d = 0) +
+          wday + mday + yday + month + snap_TX + event_day +
+          fourier(period = "week", K = 2) +
+          fourier(period = "month", K = 3) +
+          fourier(period = "year", K = 3))
+  )
+
+fit %>% gg_tsresiduals()
+```
+## Feature autocorrelation
+```{r, fig.width=13}
+train_ext %>% glimpse()
+train_ext %>%
+  GGally::ggpairs(columns = c('sales', 'sell_price', 'discount', 'snap_TX', 'weekday'))
+```
+
+
+## Define custom RMSE
+```{r}
+custom_rmse <- function(predictions, targets){
+  sqrt(mean((as.numeric(predictions$.mean) - targets$sales) ^ 2))
+}
+```
+
+## Positive forecasts
+To impose a positivity constraint, we can simply work on the sqrt scale.
+
+## A simple model
+```{r}
+simple_fit <- train_ext_small %>%
+  model(
+    mean = MEAN(sales),
+    snaive = SNAIVE(sales ~ lag("week")),
+    drift = NAIVE(sales ~ drift())
+  )
+
+#simple_fit %>% sample_n(1) %>% gg_tsresiduals()
+simple_forecast <- simple_fit %>% forecast(h='28 days')
+#snaive_forecast %>% accuracy(test_ext_small) %>% summarise(RMSE = mean(RMSE))
+simple_forecast %>% filter(.model=='mean') %>% custom_rmse(test_ext_small)
+simple_forecast %>% filter(.model=='snaive') %>% custom_rmse(test_ext_small)
+simple_forecast %>% filter(.model=='drift') %>% custom_rmse(test_ext_small)
+
+sample_ids <- train_ext_small %>% distinct(id) %>% sample_n(3)
+simple_forecast %>% filter(id %in% sample_ids$id) %>% autoplot(train_ext_small)
+```
+
+## An simple linear regression
+```{r, fig.width=12}
+test_ext_small %>% glimpse
+
+lm_fit <- train_ext_small %>%
+  model(
+    tslm = TSLM(sqrt(sales) ~ sell_price) #snap_TX + event_day + day_around_event) as.character(snap_TX) + event_day + fourier(period=30, K=10, origin=date-years(1)) + fourier(period=365, K=15, origin=date-years(2)))
+  )
+
+#lm_fit %>% sample_n(1) %>% gg_tsresiduals()
+lm_forecast <- lm_fit %>% forecast(new_data=test_ext_small)
+
+lm_forecast <- lm_forecast %>% mutate(.mean=round(as.integer(.mean)))
+#lm_forecast %>% accuracy(test_ext_small) %>% summarise(RMSE = mean(RMSE))
+custom_rmse(lm_forecast, test_ext_small)
+
+sample_ids <- train_ext_small %>% distinct(id) %>% sample_n(5)
+train_and_test <- bind_rows(train_ext_small %>% filter_index('1/1/2015' ~ .), test_ext_small)
+lm_forecast %>% filter(id %in% sample_ids$id) %>% autoplot(train_and_test, level=NULL)
+```
+
+
+## A simple auto ARIMA (VERY SLOW)
+When there are long seasonal periods, a dynamic regression with Fourier terms is often better than other models we have considered in this book. For example, daily data can have annual seasonality of length 365, weekly data has seasonal period of approximately 52, while half-hourly data can have several seasonal periods, the shortest of which is the daily pattern of period 48. Seasonal versions of ARIMA and ETS models are designed for shorter periods such as 12 for monthly data or 4 for quarterly data.
+```{r}
+arima_fit <- train_ext_small %>%
+  model(
+    auto = ARIMA(sales)
+  )
+
+#arima_fit %>% sample_n(1) %>% gg_tsresiduals()
+arima_forecast <- arima_fit %>% forecast(new_data=test_ext_small)
+
+#arima_forecast %>% accuracy(test_ext_small) %>% summarise(RMSE = mean(RMSE))
+custom_rmse(arima_forecast, test_ext_small)
+
+sample_ids <- train_ext_small %>% distinct(id) %>% sample_n(3)
+arima_forecast %>% filter(id %in% sample_ids$id) %>% autoplot(train_ext_small)
+```
+
+## Use CROSTON model for time series of counts
+All of the methods discussed in this book assume that the data have a continuous sample space. However, in our case we have to forecast counts. “Croston’s method,” named after its British inventor, John Croston, and first described in Croston (1972). Actually, this method does not properly deal with the count nature of the data either, but it is used so often, that it is worth trying it. With Croston’s method, we construct two new series from our original time series by noting which time periods contain zero values, and which periods contain non-zero values.Below we try the CROSTON method to predict sales for each individual product.
+```{r}
+croston_fit <- train_ext_small %>% model(CROSTON(sales))
+
+croston_fit %>% sample_n(1) %>% gg_tsresiduals()
+
+croston_forecast <- croston_fit %>% forecast(h = '28 days')
+
+#croston_forecast %>% accuracy(test_ext_small) %>% summarise(RMSE = mean(RMSE))
+custom_rmse(croston_forecast, test_ext_small)
+
+sample_ids <- train_ext_small %>% distinct(id) %>% sample_n(3)
+croston_forecast %>% filter(id %in% sample_ids$id) %>% autoplot(train_ext_small)
+```
+
+## Dynamic harmonic regression
+When there are long seasonal periods, a dynamic regression with Fourier terms is often better than other models we have considered in this book.
+```{r, fig.width=13}
+#fourier(period = "week", K = 2) +
+#fourier(period = "month", K = 3) +
+#fourier(period = "year", K = 3))
+train_ext_small %>% glimpse()
+dynamic_regression_fit <- train_ext_small %>%
+   model(
+    ARIMA(sqrt(sales) ~ sell_price + discount + weekday + pdq(d=0) + PDQ(0,0,0))
+  )
+
+#dynamic_regression_fit %>% sample_n(1) %>% gg_tsresiduals()
+dynamic_regression_forecast <- dynamic_regression_fit %>% forecast(new_data=test_ext_small) %>% mutate(.mean = if_else(is.na(.mean), 0, round(.mean)))
+
+#dynamic_regression_forecast %>% accuracy(test_ext_small) %>% summarise(RMSE = mean(RMSE))
+custom_rmse(dynamic_regression_forecast, test_ext_small)
+sample_ids <- train_ext_small %>% distinct(id) %>% sample_n(5)
+train_and_test <- bind_rows(train_ext_small %>% filter_index('1/1/2015' ~ .), test_ext_small)
+dynamic_regression_forecast %>% filter(id %in% sample_ids$id) %>% autoplot(train_and_test)
+```
+
+## Prophet model
+```{r}
+library(fable.prophet)
+?prophet
+
+holidays <- submission_dataset %>% filter(!is.na(event_name_1)) %>% select(event_name_1) %>% mutate(holiday=event_name_1)
+holidays <- bind_rows(submission_dataset %>% filter(!is.na(event_name_2)) %>% select(event_name_2) %>% mutate(holiday=event_name_2))
+holidays <- holidays %>% distinct(date, .keep_all= TRUE) %>% as_tsibble(index=date, key=NULL) %>% select(holiday)
+
+train_ext_small %>% glimpse
+
+prophet_fit <- train_ext_small %>% model(
+  prophet(sales ~ season(period = "year", type='multiplicative') + 
+            season(period = "week", type='multiplicative') + 
+            growth(type='linear') + 
+            holiday(holidays)
+            )
+)
+
+prophet_fit %>% sample_n(1) %>% components() %>% autoplot()
+prophet_fit %>% sample_n(1) %>% gg_tsresiduals()
+
+prophet_forecast <- prophet_fit %>% forecast(new_data=test_ext_small)
+
+prophet_forecast %>% accuracy(test_ext_small) %>% summarise(RMSE = mean(RMSE))
+custom_rmse(prophet_forecast, test_ext_small)
+
+sample_ids <- train_ext_small %>% distinct(id) %>% sample_n(3)
+prophet_forecast %>% filter(id %in% sample_ids$id) %>% autoplot(train_ext_small)
+```
+
+## Create submission file
+```{r}
+convert_to_submission <- function(df){ 
+  min_date <- date("2016-05-23")
+  df %>%
+    as_data_frame() %>%
+    mutate(date= as.integer(date-min_date)) %>%
+    mutate(sales = round(as.numeric(.mean))) %>%
+    mutate(date = date - min(date)+1) %>%
+    mutate(date = paste0("F", as.character(date))) %>%
+    select(-.model, -.mean) %>%
+    pivot_wider(names_from=date, values_from = sales) %>%
+    mutate(id = paste0(id, "_TX_3_validation"))
+}
+```
+
+## Create submission with CROSTON
+```{r}
+croston_forecast <- submission_dataset %>%
+  model(
+    croston = CROSTON(sales)
+  ) %>%
+  forecast(h = 28)
+
+convert_to_submission(croston_forecast) %>% write.csv('croston_submission.csv', row.names = FALSE)
+```
+
+## Create submission with Dynamic regression model
+```{r}
+dr_full_forecast <- submission_dataset %>%
+  model(
+    ARIMA(sqrt(sales) ~ sell_price + discount + weekday + pdq(d=0) + PDQ(0,0,0))
+  ) %>%
+  forecast(new_data=submission_new_data)
+
+dr_full_forecast %>% select(id, date, sales, .mean)
+#convert_to_submission(dr_full_forecast %>% select(id, date, sales, .mean, .model) %>% mutate(.mean = if_else(is.na(.mean), 0, round(.mean)))) %>% write.csv('dr_submission.csv', row.names = FALSE)
+convert_to_submission(dr_full_forecast %>% select(id, date, sales, .mean, .model) %>% mutate(.mean = if_else(is.na(.mean), 0, .mean))) %>% write.csv('dr_submission.csv', row.names = FALSE)
+```
+
+## Submission with Prophet
+```{r}
+holidays <- submission_dataset %>% filter(!is.na(event_name_1)) %>% select(event_name_1) %>% mutate(holiday=event_name_1)
+holidays <- bind_rows(submission_dataset %>% filter(!is.na(event_name_2)) %>% select(event_name_2) %>% mutate(holiday=event_name_2))
+holidays <- holidays %>% distinct(date, .keep_all= TRUE) %>% as_tsibble(index=date, key=NULL) %>% select(holiday)
+
+prophet_fit <- submission_dataset %>% model(
+  prophet(sales ~ season(period = "year", type='multiplicative') + 
+            season(period = "week", type='multiplicative') + 
+            growth(type='linear') + 
+            holiday(holidays)
+            )
+)
+
+prophet_forecast <- prophet_fit %>% forecast(h='28 days')
+convert_to_submission(prophet_forecast %>% mutate(.mean = round(.mean))) %>% write.csv('prophet_submission.csv', row.names = FALSE)
+```
+
+## A naive submission
+```{r}
+dcmp <- submission_dataset %>%
+  model(STL(sales ~ trend(window = 15), robust = TRUE)) %>%
+  components() %>%
+  select(-.model)
+
+simple_fit_full <- dcmp %>%
+  model(
+    mean = MEAN(season_adjust, window=7)
+  )
+
+simple_forecast_full <- simple_fit_full %>% forecast(h='28 days')
+
+convert_to_submission(simple_forecast_full %>% mutate(.mean = round(.mean))) %>% select(-season_adjust) %>% write.csv('naive_submission.csv', row.names = FALSE)
+```
+
+## A TSLM submission
+```{r}
+
+lm_fit_full <- submission_dataset %>%
+  model(
+    tslm = TSLM(sqrt(sales) ~ wday + discount + event_day + fourier(period=30, K=10, origin=date-years(1)) + fourier(period=365, K=15, origin=date-years(2)))
+  )
+
+lm_forecast <- lm_fit %>% forecast(new_data=submission_new_data)
+
+convert_to_submission(simple_forecast_full %>% mutate(.mean = round(.mean))) %>% select(-season_adjust) %>% write.csv('tslm_submission.csv', row.names = FALSE)
+```
+
+## Experimentation
+
+## ETS
+```{r}
+ets_fit <- train_ext_small %>%
+  model(
+    ets = ETS(sales~ error("A") + trend("A") + season("A")),
+    ets2 = ETS(sales),
+    ets3 = ETS(sales~ error("A") + trend("N") + season("N")),
+    ets4 = ETS(sales~ error("A") + trend("A") + season("N"))
+  )
+
+ets_forecast <- ets_fit %>% forecast(new_data=test_ext_small)
+ets_forecast %>% accuracy(test_ext_small) %>% group_by(.model) %>% summarise(RMSE = mean(RMSE))
+#custom_rmse(arima_forecast, test_ext_small)
+```
+## TSLM
+```{r}
+tslm_fit <- train_ext_small %>%
+  model(
+    tslm_base = TSLM(sales),
+    tslm = TSLM(sales ~snap_TX),
+    tslm2 = TSLM(sales ~wday),
+    tslm3 = TSLM(sales ~month),
+    tslm4 = TSLM(sales ~snap_TX + wday + month),
+    tslm5 = TSLM(sales ~ wday + month),
+  )
+
+tslm_forecast <- tslm_fit %>% forecast(new_data=test_ext_small)
+
+tslm_forecast %>% accuracy(test_ext_small) %>% group_by(.model) %>% summarise(RMSE = mean(RMSE))
+#custom_rmse(tslm_forecast, test_ext_small)
+```
+
+## ARIMA
+```{r}
+arima_fit <- train_ext_small %>%
+  model(
+    arima = ARIMA(sales),
+    arima2 = ARIMA(sales ~ PDQ(0, 0, 0) + fourier(K = 1)),
+    arima3 = ARIMA(sales ~ PDQ(0, 0, 0) + fourier(K = 2)),
+    arima4 = ARIMA(sales ~ PDQ(0, 0, 0) + fourier(K = 3)),
+  )
+
+arima_forecast <- arima_fit %>% forecast(new_data=test_ext_small)
+
+arima_forecast %>% accuracy(test_ext_small) %>% group_by(.model) %>% summarise(RMSE = mean(RMSE), ME = mean(ME), MAE = mean(MAE))
+#custom_rmse(arima_forecast, test_ext_small)
+```
+
+
+
+## Combination models
+Often in forecasting, multiple models can predict better than one. Multiple combinations of models were tested to see what kind of results they gave
+```{r}
+combo_fit <- train_ext_small %>%
+  model(
+    auto = ARIMA(sales),
+    croston = CROSTON(sales),
+    ets = ETS(sales~ error("A") + trend("A") + season("A"))
+  )%>%mutate(combination = (ets+ets + croston + auto+auto ) / 5)
+
+combo_forecast <- combo_fit %>% forecast(new_data=test_ext_small)
+
+combo_forecast %>% accuracy(test_ext_small) %>% summarise(RMSE = mean(RMSE))
+custom_rmse(combo_forecast, test_ext_small)
+
+#sample_ids <- train_ext_small %>% distinct(id) %>% sample_n(3)
+#arima_forecast %>% filter(id %in% sample_ids$id) %>% autoplot(train_ext_small)
+```
+
+
+```{r}
+ets_fit <- train_ext_small %>%
+  model(
+    ets = ETS(sales~ error("A") + trend("N") + season("N")),
+    croston = CROSTON(sales)
+  )%>% mutate(combination = (ets+ croston)/2)
+
+#ets_fit %>% report()
+#ets_fit %>% sample_n(1) %>% gg_tsresiduals()
+
+ets_forecast <- ets_fit %>% forecast(new_data=test_ext_small)
+
+ets_forecast %>% accuracy(test_ext_small) %>% summarise(RMSE = mean(RMSE))
+custom_rmse(ets_forecast, test_ext_small)
+
+```
+
+```{r}
+
+holidays <- submission_dataset %>% filter(!is.na(event_name_1)) %>% select(event_name_1) %>% mutate(holiday=event_name_1)
+holidays <- bind_rows(submission_dataset %>% filter(!is.na(event_name_2)) %>% select(event_name_2) %>% mutate(holiday=event_name_2))
+holidays <- holidays %>% distinct(date, .keep_all= TRUE) %>% as_tsibble(index=date, key=NULL) %>% select(holiday)
+
+prophet_fit <- train_ext_small %>% model(
+  prophet = prophet(sales ~ season(period = "year", type='additive') + 
+            season(period = "week", type='additive') + 
+            growth(type='linear') + 
+            holiday(holidays)
+            ), auto = ARIMA(sales), ets = ETS(sales~ error("A") + trend("A") + season("A"))
+)%>%mutate(combination = (prophet + auto+ets) / 3)
+
+
+prophet_forecast <- prophet_fit %>% forecast(new_data=test_ext_small)
+
+prophet_forecast %>% accuracy(test_ext_small) %>% summarise(RMSE = mean(RMSE))
+custom_rmse(prophet_forecast, test_ext_small)
+
+```
+
+```{r}
+STLF <- decomposition_model(
+  STL(sales ~ season(period = 'week') +season(period = 'month') + season(period = 'year'), robust = TRUE),
+  ETS(season_adjust ~ season("N"))
+)
+arima_fit <- train_ext_small %>%
+  model(
+    stlf = STLF,
+    auto = ARIMA(sales),
+    croston = CROSTON(sales),
+    ets = ETS(sales~ error("A") + trend("A") + season("A"))
+  )%>%mutate(combination = (stlf + ets + croston + auto ) / 4)
+
+#arima_fit %>% report()
+#arima_fit %>% sample_n(1) %>% gg_tsresiduals()
+
+arima_forecast <- arima_fit %>% forecast(new_data=test_ext_small)
+
+arima_forecast %>% accuracy(test_ext_small) %>% summarise(RMSE = mean(RMSE))
+custom_rmse(arima_forecast, test_ext_small)
+
+#sample_ids <- train_ext_small %>% distinct(id) %>% sample_n(3)
+#arima_forecast %>% filter(id %in% sample_ids$id) %>% autoplot(train_ext_small)
+```
+
+## NNETAR
+```{r}
+nnetar_fit <- train_ext_small %>%
+  model(
+    #nnetar1 = NNETAR(sqrt(sales)),
+    #nnetar2 = NNETAR(sqrt(sales), decay=0.5, maxit=150)
+    nnetar = NNETAR(sales)
+  )
+
+
+nnetar_forecast <- nnetar_fit %>% forecast(new_data=test_ext_small, times=10)
+
+nnetar_forecast %>% accuracy(test_ext_small) %>% summarise(RMSE = mean(RMSE))
+custom_rmse(arima_forecast, test_ext_small)
+```
+
+```{r}
+nnetar_fit <- train_ext_small %>%
+  model(
+    #nnetar = NNETAR(sqrt(sales)),
+    #nnetar2 = NNETAR(sqrt(sales), repeats = 10),
+    nnetar3 = NNETAR(sales~sell_price)
+  )
+
+#nnetar_fit %>% report()
+#nnetar_fit %>% sample_n(1) %>% gg_tsresiduals()
+
+nnetar_forecast <- nnetar_fit %>% forecast(new_data=test_ext_small, times=10)
+
+nnetar_forecast %>% accuracy(test_ext_small) %>% group_by(.model) %>% summarise(RMSE = mean(RMSE))
+custom_rmse(arima_forecast, test_ext_small)
+```
+
+
+## Takes very long
+```{r}
+NNETAR_forecast <- submission_dataset %>%
+  model(
+    nnetar = NNETAR(sales)
+  )
+NNETAR_fc <- NNETAR_forecast %>% forecast(h = 28, times=10)
+
+convert_to_submission(NNETAR_fc) %>% write.csv('nnetar_submission.csv', row.names = FALSE)
+```
+
+## Bagging(
+Generating similar data so the forecast is more accurate (can handle outliers in training data better)
+factor times here is set to 10 as standard (generate 10 fake time series) and block_size is set to 7 (period chosen = week)
+```{r}
+train_small_stl <- train_ext_small %>%
+  model(stl = STL(sales))
+sim <- train_small_stl %>%
+  generate(new_data = train_ext_small, times = 10,
+           bootstrap_block_size = 7) %>%
+  select(-.model, -sales)
+ets_forecasts <- sim %>%
+  model(ets = ETS(.sim~ error("A") + trend("A") + season("A"))) %>%
+  forecast(h=28)
+combined1 <- aggregate(ets_forecasts[, 5:6], list(ets_forecasts$date, ets_forecasts$id), mean) %>% select(Group.1, Group.2, .mean)
+#bagged <- ets_forecasts %>% summarise(bagged_mean = mean(.mean))
+#combined1 %>% accuracy(test_ext_small) %>% summarise(RMSE = mean(RMSE))
+custom_rmse(combined1, test_ext_small)
+Metrics::rmse(combined1$.mean, test_ext_small$sales)
+Metrics::mae(combined1$.mean, test_ext_small$sales)
+Metrics::mse(combined1$.mean, test_ext_small$sales)
+```
+## Comparison
+```{r}
+ets_fit <- train_ext_small %>%
+  model(
+    ets = ETS(sales~ error("A") + trend("A") + season("A")),
+  )
+
+
+
+ets_forecast <- ets_fit %>% forecast(new_data=test_ext_small)
+ets_forecast %>% accuracy(test_ext_small) %>% group_by(.model) %>% summarise(RMSE = mean(RMSE))
+custom_rmse(ets_forecast, test_ext_small)
+```
+
+```{r}
+train_stl <- train_ext %>%
+  model(stl = STL(sales))
+sim <- train_stl %>%
+  generate(new_data = train_ext, times = 10,
+           bootstrap_block_size = 7) %>%
+  select(-.model, -sales)
+ets_forecasts <- sim %>%
+  model(ets = ETS(.sim~ error("A") + trend("A") + season("A"))) %>%
+  forecast(h=28)
+combined <- aggregate(ets_forecasts[, 5:6], list(ets_forecasts$date, ets_forecasts$id), mean)
+#bagged <- ets_forecasts %>% summarise(bagged_mean = mean(.mean))
+#combined %>% accuracy(test_ext_small) %>% summarise(RMSE = mean(RMSE))
+custom_rmse(combined, test_ext)
+```
+
+```{r}
+train_stl <- submission_dataset %>%
+  model(stl = STL(sales))
+sim <- train_stl %>%
+  generate(new_data = submission_dataset, times = 10,
+           bootstrap_block_size = 7) %>%
+  select(-.model, -sales)
+ets_forecasts <- sim %>%
+  model(ets = ETS(.sim~ error("A") + trend("A") + season("A"))) %>%
+  forecast(h=28)
+combined <- aggregate(ets_forecasts[, 5:6], list(ets_forecasts$date, ets_forecasts$id), mean)
+custom_rmse(combined, test_ext_small)
+convert_to_submission(combined) %>% write.csv('bagged_submission.csv', row.names = FALSE)
+```
+
+
+
+
+
+
+
+## Some additional features
+```{r}
+train_ext_small["weekend"] <- train_ext_small$wday < 6
+train_ext_small["price_difference"] <- difference(train_ext_small$sell_price)
+test_ext_small["weekend"] <- test_ext_small$wday < 6
+test_ext_small["price_difference"] <- difference(test_ext_small$sell_price)
+train_ext_small <-train_ext_small %>% group_by(id) %>% mutate(scaled = scale(sell_price)) %>% as_tsibble(key=id, index = date)
+test_ext_small <-test_ext_small %>% group_by(id) %>% mutate(scaled = scale(sell_price)) %>% as_tsibble(key=id, index = date)
+#train_ext_small["norm_prize"] = (train_ext_small$sell_price - #group_by(id)$sell_price.transform(mean))/(train_ext_small.group_by("id")$sell_price.transform(sigma))
+train_ext_small["weekend"] <- as.factor(train_ext_small$weekend)
+train_ext_small["snap_TX"] <- as.factor(train_ext_small$snap_TX)
+train_ext_small["event_day"] <- as.factor(train_ext_small$event_day) 
+train_ext_small<- train_ext_small %>% as_tsibble(key=id, index = date)
+test_ext_small<-test_ext_small %>% as_tsibble(key=id, index = date)
+```
+
+
+## Additional models
+```{r}
+tslm_fit <- train_ext_small %>%
+  model(
+    tslm_base = TSLM(sales),
+    tslm1 = TSLM(sales ~ wday + month),
+    tslm2 = TSLM(sales ~ event_day + wday + month + weekend),
+    tslm3 = TSLM(sales ~ sell_price),
+    tslm3 = TSLM(sales ~ sell_price+ event_day + wday + month + weekend),
+  )
+
+tslm_forecast <- tslm_fit %>% forecast(new_data=test_ext_small)
+
+tslm_forecast %>% accuracy(test_ext_small) %>% group_by(.model) %>% summarise(RMSE = mean(RMSE))
+#custom_rmse(tslm_forecast, test_ext_small)
+```
+
+
+```{r}
+comb_fit <- train_ext_small %>%
+  model(
+    tslm2 = TSLM(sqrt(sales) ~ sell_price+event_day + wday + month + weekend),
+    ets = ETS(sqrt(sales)~ error("A") + trend("A") + season("A")),
+    arima = ARIMA(sqrt(sales))
+  )%>%mutate(combination = (tslm2 + ets + arima ) / 3)
+
+comb_forecast <- comb_fit %>% forecast(new_data=test_ext_small)
+
+comb_forecast %>% accuracy(test_ext_small) %>% group_by(.model) %>% summarise(RMSE = mean(RMSE))
+#custom_rmse(tslm_forecast, test_ext_small)
+```
+
+
+```{r}
+arima_fit <- train_ext_small %>%
+  model(arima = ARIMA(sales), 
+        arima2 = ARIMA(sqrt(sales)),
+        arima3 = ARIMA(sqrt(sales)~PDQ(0,0,0)+fourier(K=2)),
+        arima4 = ARIMA(sqrt(sales) ~snap_TX + weekend + event_day))
+
+#arima_fit %>% report()
+#arima_fit %>% sample_n(1) %>% gg_tsresiduals()
+
+arima_forecast <- arima_fit %>% forecast(new_data=test_ext_small)
+
+arima_forecast %>% accuracy(test_ext_small) %>% group_by(.model) %>% summarise(RMSE = mean(RMSE), ME = mean(ME), MAE = mean(MAE))
+#custom_rmse(arima_forecast, test_ext_small)
+
+#sample_ids <- train_ext_small %>% distinct(id) %>% sample_n(3)
+#arima_forecast %>% filter(id %in% sample_ids$id) %>% autoplot(train_ext_small)
+```
+
+
+
+```{r}
+tslm_fit <- train_ext_small %>%
+  model(
+    tslm_base = TSLM(sqrt(sales)),
+    tslm1 = TSLM(sqrt(sales) ~ wday + month),
+    tslm2 = TSLM(sqrt(sales) ~ event_day + wday + month + weekend),
+    tslm3 = TSLM(sqrt(sales) ~ sell_price),
+  )
+
+tslm_forecast <- tslm_fit %>% forecast(new_data=test_ext_small)
+
+tslm_forecast %>% accuracy(test_ext_small) %>% group_by(.model) %>% summarise(RMSE = mean(RMSE))
+#custom_rmse(tslm_forecast, test_ext_small)
+```
+
+```{r}
+nnetar_fit <- train_ext_small %>%
+  model(
+    #nnetar = NNETAR(sqrt(sales)),
+    #nnetar2 = NNETAR(sqrt(sales), repeats = 10),
+    nnetar3 = NNETAR(sqrt(sales) ~sell_price +wday))
+
+#arima_fit %>% report()
+#arima_fit %>% sample_n(1) %>% gg_tsresiduals()
+
+nnetar_forecast <- nnetar_fit %>% forecast(new_data=test_ext_small, times=10)
+
+nnetar_forecast %>% accuracy(test_ext_small) %>% group_by(.model) %>% summarise(RMSE = mean(RMSE))
+custom_rmse(arima_forecast, test_ext_small)
+```
+
+
+### Benchmark models
+```{r}
+benchmark_fit <- train_ext_small %>% 
+  model(
+    Mean = MEAN(sales),
+    Naive = NAIVE(sales),
+    Season_Naive = SNAIVE(sales),
+    Drift = RW(sales ~ drift()),
+  )
+
+benchmark_fc <- benchmark_fit %>% forecast(h = 28)
+benchmark_fc %>% accuracy(test_ext_small) %>% group_by(.model) %>% summarise(MAE = mean(MAE)) %>% arrange(MAE)
+
+benchmark_fc %>% filter(.model == "Mean") %>% custom_rmse(test_ext_small)
+benchmark_fc %>% filter(.model == "Naive") %>% custom_rmse(test_ext_small)
+benchmark_fc %>% filter(.model == "Season_Naive") %>% custom_rmse(test_ext_small)
+benchmark_fc %>% filter(.model == "Drift") %>% custom_rmse(test_ext_small)
+
+benchmark_fc %>% filter(id == "FOODS_3_370") %>% autoplot(test_ext_small, level = NULL) + 
+  labs(title = "Example forecasts: benchmark methods")
+```
+
+### ETS and ARIMA
+```{r}
+multi_fit <- train_ext_small %>% 
+  model(
+    ETS = ETS(sales), 
+    ARIMA = ARIMA(sales), 
+    Fourier = ARIMA(sales ~ fourier(K = 1) + PDQ(0,0,0)),
+  )
+
+multi_fit_2 <- multi_fit %>% 
+  mutate(Comb = (ETS + ARIMA) / 2)
+
+multi_fc <- multi_fit_2 %>% forecast(h = 28)
+multi_fc %>% accuracy(test_ext_small) %>% group_by(.model) %>% summarise(MAE = mean(MAE))
+
+multi_fc %>% filter(.model == "ETS") %>% custom_rmse(test_ext_small)
+multi_fc %>% filter(.model == "ARIMA") %>% custom_rmse(test_ext_small)
+multi_fc %>% filter(.model == "Fourier") %>% custom_rmse(test_ext_small)
+multi_fc %>% filter(.model == "Comb") %>% custom_rmse(test_ext_small)
+
+multi_fc %>% filter(id == "FOODS_3_370") %>% filter(.model %in% c("ETS", "ARIMA")) %>% 
+  autoplot(test_ext_small, level = NULL) + 
+  labs(title = "Example forecasts: ETS and ARIMA")
+```
+
+
+### TSLM and Dynamic Regression models
+```{r}
+Get_Day_Types_2 <- function(df){
+  df %>% 
+    mutate(Weekend = case_when(
+      wday(date) %in% 2:6 ~ 1, 
+      TRUE ~ 0)) %>% 
+    mutate(Cultural = case_when(
+    event_type_1 == "Cultural" | event_type_2 == "Cultural" ~ 1, 
+    TRUE ~ 0)) %>% 
+    mutate(Religious = case_when(
+      event_type_1 == "Religious" | event_type_2 == "Religious" ~ 1, 
+      TRUE ~ 0)) %>% 
+    mutate(National = case_when(
+      event_type_1 == "National" | event_type_2 == "National" ~ 1, 
+      TRUE ~ 0)) %>% 
+    mutate(Sporting = case_when(
+      event_type_1 == "Sporting" | event_type_2 == "Sporting" ~ 1, 
+      TRUE ~ 0)) %>% 
+    select(-event_name_1, -event_type_1, -event_name_2, -event_type_2)
+}
+
+train_ext_small_2 <- train_ext_small %>% Get_Day_Types_2()
+
+
+train_fit <- train_ext_small_2 %>%
+  model(
+    N_Reg = TSLM(sales ~ sell_price + Weekend + Cultural + Religious + National + Sporting + snap_TX),
+    D_Reg = ARIMA(sales ~ sell_price + Weekend + Cultural + Religious + National + Sporting + snap_TX), 
+    
+    N_Reg_lag = TSLM(sales ~ sell_price + Weekend +
+                   Cultural + lag(Cultural, 1) + lag(Cultural, 2) + lag(Cultural, 3) +
+                   Religious + lag(Religious, 1) + lag(Religious, 2) + lag(Religious, 3) +
+                   National + lag(National, 1) + lag(National, 2) + lag(National, 3) +
+                   Sporting + snap_TX),
+    D_Reg_lag = ARIMA(sales ~ sell_price + Weekend +
+                    Cultural + lag(Cultural, 1) + lag(Cultural, 2) + lag(Cultural, 3) +
+                    Religious + lag(Religious, 1) + lag(Religious, 2) + lag(Religious, 3) +
+                    National + lag(National, 1) + lag(National, 2) + lag(National, 3) +
+                    Sporting + snap_TX),
+  )
+
+
+train_fit_2 <- train_fit %>% 
+  mutate(D_Reg = case_when(
+    is_null_model(D_Reg) ~ N_Reg,
+    TRUE ~ D_Reg
+  )) %>% 
+  mutate(D_Reg_lag = case_when(
+    is_null_model(D_Reg_lag) ~ N_Reg_lag,
+    TRUE ~ D_Reg_lag
+  )) %>%
+  mutate(Comb = (N_Reg + D_Reg) / 2) %>%
+  mutate(Comb_lag = (N_Reg_lag + D_Reg_lag) / 2)
+
+train_fit_2 %>% glance() %>% group_by(.model) %>% summarise(AICc = mean(AICc))
+
+test_ext_small_2 <- test_ext_small %>% Get_Day_Types_2()
+
+train_fc <- train_fit_2 %>% forecast(test_ext_small_2)
+train_fc %>% accuracy(test_ext_small_2) %>% group_by(.model) %>% summarise(MAE = mean(MAE))
+
+train_fc %>% filter(.model == "N_Reg") %>% custom_rmse(test_ext_small_2)
+train_fc %>% filter(.model == "D_Reg") %>% custom_rmse(test_ext_small_2)
+train_fc %>% filter(.model == "Comb") %>% custom_rmse(test_ext_small_2)
+
+train_fc %>% filter(.model == "N_Reg_lag") %>% custom_rmse(test_ext_small_2)
+train_fc %>% filter(.model == "D_Reg_lag") %>% custom_rmse(test_ext_small_2)
+train_fc %>% filter(.model == "Comb_lag") %>% custom_rmse(test_ext_small_2)
+
+train_fc %>% filter(id == "FOODS_3_370") %>% filter(.model %in% c("N_Reg", "D_Reg")) %>% 
+  autoplot(test_ext_small_2, level = NULL) + 
+  labs(title = "Example forecasts: TSLM and Dynamic Regression")
+```
