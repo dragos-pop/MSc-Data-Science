@@ -1,6 +1,9 @@
 # MSc-Data-Science
 A repository containing some projects and assignments from my Master degree.
 
+### Data Systems Project (2021-2022: 5294DASP6Y)
+- Project: Leveraging Publicly Available Data to Enhance the Risk-Based Fire Safety (80%)
+
 ### Applied Forecasting in Complex Systems (2021-2022: 5294AFIC6Y)
 - Assignment 1 (58,5%)
 - Assignment 2 (100%)
