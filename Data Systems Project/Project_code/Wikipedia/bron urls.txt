@@ -1,0 +1,8 @@
+https://nl.wikipedia.org/wiki/Lijst_van_monumenten_in_Amsterdam
+label: "monument of gebouw"
+https://nl.wikipedia.org/wiki/Lijst_van_musea_in_Amsterdam
+label: "museum"
+https://nl.wikipedia.org/wiki/Lijsten_van_Amsterdamse_onderwerpen
+labels: ["Monument of Gebouw", "Herdenkingsmonument", "Concertzaal en Theater", "Bioscoop", "Park of Recreatiegebied", "Markt"]
+https://nl.wikipedia.org/wiki/Lijst_van_kerken_in_Amsterdam
+label: "kerk"
