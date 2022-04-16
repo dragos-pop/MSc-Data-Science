@@ -1,6 +1,11 @@
 # MSc-Data-Science
 A repository containing some projects and assignments from my Master degree.
 
+### Big Data (2021-2022: 5294BIDA6Y)
+- Assignment 1: Pandas/SQL (Pass)
+- Assignment 2: MapReduce/Spark (Pass)
+- Final Project: Identifying Duplicate Entries (79,4%)
+ 
 ### Data Systems Project (2021-2022: 5294DASP6Y)
 - Project: Leveraging Publicly Available Data to Enhance the Risk-Based Fire Safety (80%)
 
