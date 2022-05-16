@@ -1,6 +1,10 @@
 # MSc-Data-Science
 A repository containing some projects and assignments from my Master degree.
 
+### Information Retrieval (2021-2022: 52041INR6Y)
+- Assignment 1: Implementation Search Engine (99,2%)
+- Assignment 2: Online and Offline Learn to Rank (93,3%)
+
 ### Big Data (2021-2022: 5294BIDA6Y)
 - Assignment 1: Pandas/SQL (Pass)
 - Assignment 2: MapReduce/Spark (Pass)
