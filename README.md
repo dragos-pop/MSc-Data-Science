@@ -1,6 +1,10 @@
 # MSc-Data-Science
 A repository containing some projects and assignments from my Master degree.
 
+### Data Mining Techniques (2021-2022: 52848DAM6Y)
+- Assignment 1: Data Mining Practice and Theory (88%)
+- Assignment 2: A Real Life Competition (Not graded yet)
+
 ### Information Retrieval 1 (2021-2022: 52041INR6Y)
 - Assignment 1: Implementation Search Engine (99,2%)
 - Assignment 2: Offline Learn to Rank (93,3%)
